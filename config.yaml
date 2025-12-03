@@ -1,0 +1,25 @@
+github:
+  source:
+    owner: your-source-owner  # 源仓库所有者（要分析的仓库）
+    repo: your-source-repo    # 源仓库名称
+    token: ${GH_TOKEN}        # GitHub Token（从环境变量读取）
+  target:
+    owner: your-target-owner  # 目标仓库所有者（创建 Issue 的仓库）
+    repo: your-target-repo    # 目标仓库名称
+    token: ${GH_TOKEN}        # GitHub Token（从环境变量读取）
+qwen:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model: qwen-plus
+  api_key: ${QWEN_API_KEY}
+  max_requests_per_minute: 30
+analysis:
+  max_pr_count: 200
+  max_issue_count: 300
+  max_discussion_count: 100
+  period: week
+output:
+  report_dir: reports
+  create_issue: true
+  issue_labels:
+  - automated
+  - report

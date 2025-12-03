@@ -1,0 +1,186 @@
+name: Daily/Weekly GitHub Repo Analysis
+
+on:
+  schedule:
+    - cron: "0 16 * * *"  # 每天 UTC 16:00（北京时间 00:00）- 自动判断 day/week 模式
+  workflow_dispatch:
+    # 仅手动触发，不响应 push 事件
+    inputs:
+      period:
+        description: '时间维度 (today/day/week)'
+        default: 'day'
+        type: choice
+        options: [today, day, week]
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: read
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Prepare config
+        env:
+          GH_SOURCE_OWNER: ${{ secrets.GH_SOURCE_OWNER }}
+          GH_SOURCE_REPO: ${{ secrets.GH_SOURCE_REPO }}
+          GH_SOURCE_TOKEN: ${{ secrets.GH_SOURCE_TOKEN }}
+          GH_TARGET_OWNER: ${{ secrets.GH_TARGET_OWNER }}
+          GH_TARGET_REPO: ${{ secrets.GH_TARGET_REPO }}
+          GH_TARGET_TOKEN: ${{ secrets.GH_TARGET_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+          QWEN_BASE_URL: ${{ secrets.QWEN_BASE_URL }}
+          QWEN_MODEL: ${{ secrets.QWEN_MODEL }}
+          QWEN_MAX_REQUESTS: ${{ secrets.QWEN_MAX_REQUESTS }}
+          ANALYSIS_MAX_PR_COUNT: ${{ secrets.ANALYSIS_MAX_PR_COUNT }}
+          ANALYSIS_MAX_ISSUE_COUNT: ${{ secrets.ANALYSIS_MAX_ISSUE_COUNT }}
+          ANALYSIS_MAX_DISCUSSION_COUNT: ${{ secrets.ANALYSIS_MAX_DISCUSSION_COUNT }}
+          OUTPUT_REPORT_DIR: ${{ secrets.OUTPUT_REPORT_DIR }}
+          OUTPUT_CREATE_ISSUE: ${{ secrets.OUTPUT_CREATE_ISSUE }}
+          OUTPUT_ISSUE_LABELS: ${{ secrets.OUTPUT_ISSUE_LABELS }}
+          ANALYSIS_PERIOD: ${{ secrets.ANALYSIS_PERIOD }}
+          INPUT_PERIOD: ${{ github.event.inputs.period }}
+        run: |
+          python3 <<'PYTHON'
+          import os, yaml
+          from datetime import datetime, timezone
+
+          # 先尝试从 config.yaml 读取默认配置
+          default_cfg = {}
+          if os.path.exists("config.yaml"):
+              try:
+                  with open("config.yaml", "r", encoding="utf-8") as f:
+                      default_cfg = yaml.safe_load(f) or {}
+              except Exception:
+                  pass
+
+          # 从环境变量（Secrets）读取配置，优先级最高
+          source_token_secret = os.environ.get("GH_SOURCE_TOKEN")
+          target_token_secret = os.environ.get("GH_TARGET_TOKEN")
+
+          # 合并配置：Secrets 优先，然后使用默认值
+          def get_config(key_path, env_var, default_value=""):
+              """从环境变量或默认配置中获取值"""
+              # 优先从环境变量（Secrets）读取
+              if env_var:
+                  env_value = os.environ.get(env_var)
+                  if env_value:
+                      return env_value
+              # 从默认配置中获取
+              keys = key_path.split(".")
+              value = default_cfg
+              for k in keys:
+                  if isinstance(value, dict) and k in value:
+                      value = value[k]
+                  else:
+                      return default_value
+              # 如果从配置文件中获取到空字符串，返回默认值
+              return value if value != "" and value is not None else default_value
+
+          cfg = {
+              "github": {
+                  "source": {
+                      "owner": get_config("github.source.owner", "GH_SOURCE_OWNER", ""),
+                      "repo": get_config("github.source.repo", "GH_SOURCE_REPO", ""),
+                      "token": "${GH_SOURCE_TOKEN}" if source_token_secret else "${GH_TOKEN}"
+                  },
+                  "target": {
+                      "owner": get_config("github.target.owner", "GH_TARGET_OWNER", ""),
+                      "repo": get_config("github.target.repo", "GH_TARGET_REPO", ""),
+                      "token": "${GH_TARGET_TOKEN}" if target_token_secret else "${GH_TOKEN}"
+                  }
+              },
+              "qwen": {
+                  "base_url": get_config("qwen.base_url", "QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+                  "model": get_config("qwen.model", "QWEN_MODEL", "qwen-plus"),
+                  "api_key": "${QWEN_API_KEY}",
+                  "max_requests_per_minute": int(get_config("qwen.max_requests_per_minute", "QWEN_MAX_REQUESTS", "30"))
+              },
+              "analysis": {
+                  "max_pr_count": int(get_config("analysis.max_pr_count", "ANALYSIS_MAX_PR_COUNT", "200")),
+                  "max_issue_count": int(get_config("analysis.max_issue_count", "ANALYSIS_MAX_ISSUE_COUNT", "300")),
+                  "max_discussion_count": int(get_config("analysis.max_discussion_count", "ANALYSIS_MAX_DISCUSSION_COUNT", "100"))
+              },
+              "output": {
+                  "report_dir": get_config("output.report_dir", "OUTPUT_REPORT_DIR", "reports"),
+                  "create_issue": (os.environ.get("OUTPUT_CREATE_ISSUE") or str(default_cfg.get("output", {}).get("create_issue", True))).lower() == "true",
+                  "issue_labels": os.environ.get("OUTPUT_ISSUE_LABELS", "").split(",") if os.environ.get("OUTPUT_ISSUE_LABELS") else default_cfg.get("output", {}).get("issue_labels", ["automated", "report"])
+              }
+          }
+
+          # 验证必需配置
+          if not cfg["github"]["source"]["owner"] or not cfg["github"]["source"]["repo"]:
+              raise ValueError("GH_SOURCE_OWNER 和 GH_SOURCE_REPO 必须在 Secrets 中配置，或配置在 config.yaml 中")
+          if not cfg["github"]["target"]["owner"] or not cfg["github"]["target"]["repo"]:
+              raise ValueError("GH_TARGET_OWNER 和 GH_TARGET_REPO 必须在 Secrets 中配置，或配置在 config.yaml 中")
+
+          # 优先级：手动输入 > Secret 配置 > 自动判断（周一 week，其他 day）
+          input_period = os.environ.get("INPUT_PERIOD")
+          secret_period = os.environ.get("ANALYSIS_PERIOD")
+
+          if input_period:
+              period = input_period
+          elif secret_period:
+              period = secret_period.lower()
+          else:
+              # 定时任务自动判断
+              today = datetime.now(timezone.utc)
+              if today.weekday() == 0:  # 周一
+                  period = "week"
+              else:
+                  period = "day"
+
+          if period not in ["today", "day", "week"]:
+              raise ValueError(f"不支持的 period 值: {period}，只支持 'today'、'day' 或 'week'")
+
+          cfg["analysis"]["period"] = period
+
+          with open("config.yaml", "w", encoding="utf-8") as f:
+              yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+          PYTHON
+
+      - name: Run analysis
+        env:
+          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_SOURCE_TOKEN: ${{ secrets.GH_SOURCE_TOKEN }}
+          GH_TARGET_TOKEN: ${{ secrets.GH_TARGET_TOKEN }}
+        run: |
+          python -m src.main --config config.yaml
+
+      - name: Commit and push report
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin
+          BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          git reset --hard origin/$BRANCH || git reset --hard origin/master || git reset --hard origin/main
+
+          if [ -f config.yaml ]; then
+            git add -f config.yaml
+          fi
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore: update analysis report"
+            git push
+          fi
+
