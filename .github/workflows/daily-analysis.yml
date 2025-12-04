@@ -54,10 +54,11 @@ jobs:
           OUTPUT_ISSUE_LABELS: ${{ secrets.OUTPUT_ISSUE_LABELS }}
           ANALYSIS_PERIOD: ${{ secrets.ANALYSIS_PERIOD }}
           INPUT_PERIOD: ${{ github.event.inputs.period }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
           python3 <<'PYTHON'
           import os, yaml
-          from datetime import datetime, timezone
+          from datetime import datetime, timezone, timedelta
 
           # 先尝试从 config.yaml 读取默认配置
           default_cfg = {}
@@ -149,11 +150,41 @@ jobs:
 
           cfg["analysis"]["period"] = period
 
+          # 判断是否应该运行分析
+          # 手动触发：总是运行，不进行日期判断
+          # 自动触发（定时任务）：
+          #   - day 模式：每天都运行
+          #   - week 模式：只有周一才运行
+          #   - today 模式：总是运行
+          event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+          is_manual_trigger = event_name == "workflow_dispatch"
+
+          should_run = True
+          if not is_manual_trigger and period == "week":
+              # 只有自动触发时才判断日期（基于北京时间）
+              beijing_tz = timezone(timedelta(hours=8))
+              now_bj = datetime.now(timezone.utc).astimezone(beijing_tz)
+              if now_bj.weekday() != 0:  # 不是周一（北京时间）
+                  should_run = False
+                  print(f"??  week 模式仅在周一运行，今天是 {now_bj.strftime('%A')}（北京时间），跳过分析")
+          elif is_manual_trigger:
+              print(f"? 手动触发，直接运行分析（period: {period}）")
+
           with open("config.yaml", "w", encoding="utf-8") as f:
               yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+
+          # 输出到环境变量，供后续步骤使用
+          github_env = os.environ.get("GITHUB_ENV")
+          if github_env:
+              with open(github_env, "a") as f:
+                  f.write(f"SHOULD_RUN={str(should_run).lower()}\n")
+          else:
+              # 如果 GITHUB_ENV 不存在，输出到标准输出（用于调试）
+              print(f"::set-output name=should_run::{str(should_run).lower()}")
           PYTHON
 
       - name: Run analysis
+        if: env.SHOULD_RUN == 'true'
         env:
           QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
@@ -163,6 +194,7 @@ jobs:
           python -m src.main --config config.yaml
 
       - name: Commit and push report
+        if: env.SHOULD_RUN == 'true'
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |

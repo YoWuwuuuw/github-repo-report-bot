@@ -101,17 +101,24 @@ def main() -> None:
         since_iso = period_start.isoformat()
         period_label = "今日"
     elif period == "day":
-        period_end = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=timezone.utc)
+        # 昨日模式：从昨天北京时间 0 点到今天北京时间 0 点
+        now_bj = now.astimezone(BEIJING_TZ)
+        today_bj_start = datetime(now_bj.year, now_bj.month, now_bj.day, 0, 0, 0, tzinfo=BEIJING_TZ)
+        period_end = today_bj_start.astimezone(timezone.utc)
         period_start = period_end - timedelta(days=1)
         since_iso = period_start.isoformat()
         period_label = "昨日"
     elif period == "week":
-        today = now.date()
-        days_since_monday = today.weekday()
-        last_monday = today - timedelta(days=days_since_monday + 7)
-        period_start = datetime.combine(last_monday, datetime.min.time(), tzinfo=timezone.utc)
-        last_sunday = last_monday + timedelta(days=6)
-        period_end = datetime.combine(last_sunday + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+        # 上周模式：从上周一北京时间 0 点到上周日北京时间 24 点（即本周一 0 点）
+        now_bj = now.astimezone(BEIJING_TZ)
+        today_bj = now_bj.date()
+        days_since_monday = today_bj.weekday()
+        last_monday_bj = today_bj - timedelta(days=days_since_monday + 7)
+        last_monday_start = datetime.combine(last_monday_bj, datetime.min.time(), tzinfo=BEIJING_TZ)
+        period_start = last_monday_start.astimezone(timezone.utc)
+        last_sunday_bj = last_monday_bj + timedelta(days=6)
+        this_monday_start = datetime.combine(last_monday_bj + timedelta(days=7), datetime.min.time(), tzinfo=BEIJING_TZ)
+        period_end = this_monday_start.astimezone(timezone.utc)
         since_iso = period_start.isoformat()
         period_label = "上周（周一至周日）"
     else:
